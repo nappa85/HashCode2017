@@ -112,13 +112,13 @@ class Pizza {
                     continue;
                 }
 
-                for($iRow2 = $iRow1; $iRow2 < $this->iRows; $iRow2++) {
+                for($iRow2 = $iRow1; $iRow2 < min($this->iRows, $iRow1 + $this->iMaxCells + 1); $iRow2++) {
                     //slices can't overlap
                     if(is_null($this->aPizza[$iRow2][$iColumn1])) {
                         break;
                     }
 
-                    for($iColumn2 = $iColumn1; $iColumn2 < $this->iColumns; $iColumn2++) {
+                    for($iColumn2 = $iColumn1; $iColumn2 < min($this->iColumns, $iColumn1 + $this->iMaxCells + 1); $iColumn2++) {
                         //slices can't overlap
                         if(is_null($this->aPizza[$iRow2][$iColumn2])) {
                             break;
