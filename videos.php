@@ -65,6 +65,13 @@ class Videos {
     protected $aVideos = array();
 
     /**
+     * Array of Gains
+     * @var array
+     * @protected
+     */
+    protected $aGains = array();
+
+    /**
      * Constructor
      * @param   string  file    input file
      */
@@ -96,7 +103,8 @@ class Videos {
             $aEndPoint = array(
                 'videos' => array(),
                 'latencies' => array(),
-                'servers' => array()
+                'servers' => array(),
+                'requests' => array()
             );
 
             list($aEndPoint['latency'], $aEndPoint['servers']) = explode(' ', trim($aFile[$i++]));
@@ -123,7 +131,7 @@ class Videos {
             $this->aVideos[$aTemp['video']]['endpoints'][$aTemp['endpoint']] = $aTemp['requests'];
             $this->aVideos[$aTemp['video']]['requests'] += $aTemp['requests'];
         }
-
+/*
         foreach($this->aEndPoints as &$aEndPoint) {
             arsort($aEndPoint['latencies']);
             arsort($aEndPoint['videos']);
@@ -133,6 +141,15 @@ class Videos {
             arsort($aVideo['endpoints']);
         }
         uasort($this->aVideos, array($this, '_sortVideos'));
+*/
+        foreach($this->aEndPoints as $iEndPoint => $aEndPoint) {
+            foreach($aEndPoint['requests'] as $iVideo => $iRequests) {
+                foreach($aEndPoint['latencies'] as $iServer => $iDelta) {
+                    $this->aGains[$iEndPoint.'-'.$iVideo.'-'.$iServer] = $iDelta * $iRequests;
+                }
+            }
+        }
+        arsort($this->aGains);
     }
 
     /**
@@ -149,39 +166,34 @@ class Videos {
     /**
      * Caches the video
      */
-    protected function cacheUnrequestedVideo($iVideo) {
-        foreach($this->aServers as $iServer => $aServer) {
-            if($aServer['size'] >= $this->aVideos[$iVideo]['size']) {
-                $this->aServers[$iServer]['videos'][] = $iVideo;
-                $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
-                break;
-            }
-        }
-    }
+//     protected function cacheUnrequestedVideo($iVideo) {
+//         foreach($this->aServers as $iServer => $aServer) {
+//             if($aServer['size'] >= $this->aVideos[$iVideo]['size']) {
+//                 $this->aServers[$iServer]['videos'][] = $iVideo;
+//                 $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
+//                 break;
+//             }
+//         }
+//     }
 
     /**
      * Caches the video
      */
-    protected function cacheVideo($iVideo, $iEndPoint) {
-        //compute the gains between delta and requests
-        $aGains = array();
-        foreach($this->aEndPoints[$iEndPoint]['latencies'] as $iServer => $iDelta) {
-            //multiply the delta for the requests
-            $aGains[$iServer] = $iDelta * $this->aEndPoints[$iEndPoint]['requests'][$iVideo];
+    protected function cacheVideo($iVideo, $iEndPoint, $iServer) {
+        if(in_array($iVideo, $this->aServers[$iServer]['videos'])) {
+            return;
         }
 
-        arsort($aGains);
+        if($this->aServers[$iServer]['size'] < $this->aVideos[$iVideo]['size']) {
+            return;
+        }
 
-        foreach($aGains as $iServer => $iGain) {
-            if(in_array($iVideo, $this->aServers[$iServer]['videos'])) {
-                break;
-            }
+        $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
+        $this->aServers[$iServer]['videos'][] = $iVideo;
 
-            if($this->aServers[$iServer]['size'] >= $this->aVideos[$iVideo]['size']) {
-                $this->aServers[$iServer]['videos'][] = $iVideo;
-                $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
-                break;
-            }
+        //delete unneeded values
+        for($i = 0; $i < $this->iCacheServers; $i++) {
+            unset($this->aGains[$iEndPoint.'-'.$iVideo.'-'.$i]);
         }
     }
 
@@ -205,15 +217,31 @@ class Videos {
      * Delivers the videos
      */
     public function deliver() {
-        foreach($this->aVideos as $iVideo => $aVideo) {
-            if($aVideo['requests'] > 0) {
-                foreach($aVideo['endpoints'] as $iEndPoint => $iRequests) {
-                    $this->cacheVideo($iVideo, $iEndPoint);
-                }
+        $sLastKey = '';
+        while(!empty($this->aGains)) {
+            //check if it has been already parsed
+            $aKeys = array_keys($this->aGains);
+            if($aKeys[0] == $sLastKey) {
+                unset($this->aGains[$aKeys[0]]);
+                $iIndex = 1;
             }
             else {
-                $this->cacheUnrequestedVideo($iVideo);
+                $iIndex = 0;
             }
+
+            $sLastKey = $aKeys[$iIndex];echo "$sLastKey\n";
+            list($iEndPoint, $iVideo, $iServer) = explode('-', $sLastKey);
+
+            $this->cacheVideo($iVideo, $iEndPoint, $iServer);
+
+//             if($aVideo['requests'] > 0) {
+//                 foreach($aVideo['endpoints'] as $iEndPoint => $iRequests) {
+//                     $this->cacheVideo($iVideo, $iEndPoint);
+//                 }
+//             }
+//             else {
+//                 $this->cacheUnrequestedVideo($iVideo);
+//             }
         }
 
         return $this->getOutput();
