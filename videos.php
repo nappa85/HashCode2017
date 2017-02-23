@@ -104,7 +104,8 @@ class Videos {
             for($j = 0; $j < $aEndPoint['servers']; $j++) {
                 $aTemp = array();
                 list($aTemp['server'], $aTemp['latency']) = explode(' ', trim($aFile[$i++]));
-                $aEndPoint['latencies'][$aTemp['server']] = $aTemp['latency'];
+                //store difference between datacenter latency and cache server latency
+                $aEndPoint['latencies'][$aTemp['server']] = $aEndPoint['latency'] - $aTemp['latency'];
 
                 $this->aServers[$aTemp['server']]['endpoints'][count($this->aEndPoints)] = $aTemp['latency'];
             }
@@ -117,14 +118,14 @@ class Videos {
             list($aTemp['video'], $aTemp['endpoint'], $aTemp['requests']) = explode(' ', trim($aFile[$i++]));
             $this->aRequests[] = $aTemp;
 
-            $this->aEndPoints[$aTemp['endpoint']]['videos'][$aTemp['video']] += $aTemp['requests'];
+            $this->aEndPoints[$aTemp['endpoint']]['requests'][$aTemp['video']] += $aTemp['requests'];
 
             $this->aVideos[$aTemp['video']]['endpoints'][$aTemp['endpoint']] = $aTemp['requests'];
             $this->aVideos[$aTemp['video']]['requests'] += $aTemp['requests'];
         }
 
         foreach($this->aEndPoints as &$aEndPoint) {
-            asort($aEndPoint['latencies']);
+            arsort($aEndPoint['latencies']);
             arsort($aEndPoint['videos']);
         }
 
@@ -162,14 +163,18 @@ class Videos {
      * Caches the video
      */
     protected function cacheVideo($iVideo, $iEndPoint) {
-        foreach($this->aEndPoints[$iEndPoint]['latencies'] as $iServer => $iLatency) {
+        //compute the gains between delta and requests
+        $aGains = array();
+        foreach($this->aEndPoints[$iEndPoint]['latencies'] as $iServer => $iDelta) {
+            //multiply the delta for the requests
+            $aGains[$iServer] = $iDelta * $this->aEndPoints[$iEndPoint]['requests'][$iVideo];
+        }
+
+        arsort($aGains);
+
+        foreach($aGains as $iServer => $iGain) {
             if(in_array($iVideo, $this->aServers[$iServer]['videos'])) {
                 break;
-            }
-
-            //if latency from cache server is greater than latency with datacenter, skip it
-            if($iLatency > $this->aEndPoints[$iEndPoint]['latency']) {
-                continue;
             }
 
             if($this->aServers[$iServer]['size'] >= $this->aVideos[$iVideo]['size']) {
