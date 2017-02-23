@@ -37,13 +37,6 @@ class Videos {
     protected $iCapacity;
 
     /**
-     * Size of every video file
-     * @var array
-     * @protected
-     */
-    protected $aVideoSizes = array();
-
-    /**
      * List of Cache servers
      * @var array
      * @protected
@@ -58,11 +51,18 @@ class Videos {
     protected $aRequests = array();
 
     /**
-     * List of EndPoints
+     * Matrix of EndPoints
      * @var array
      * @protected
      */
     protected $aEndPoints = array();
+
+    /**
+     * Matrix of Videos
+     * @var array
+     * @protected
+     */
+    protected $aVideos = array();
 
     /**
      * Constructor
@@ -74,22 +74,42 @@ class Videos {
         //let's trust the input file
         $aFile = file($sFile);
         list($this->iVideos, $this->iEndPoints, $this->iRequestDescriptions, $this->iCacheServers, $this->iCapacity) = explode(' ', trim($aFile[$i++]));
-        $this->aVideoSizes = explode(' ', trim($aFile[$i++]));
 
-        for($z = 0; $z < $this->iCacheServers; $z++) {
-            $aServer = array('latencies' => array());
+        for($j = 0; $j < $this->iCacheServers; $j++) {
+            $this->aServers[] = array(
+                'size' => $this->iCapacity,
+                'endpoints' => array(),
+                'videos' => array()
+            );
+        }
 
-            list($aServer['latency'], $aServer['servers']) = explode(' ', trim($aFile[$i++]));
+        $aTemp = explode(' ', trim($aFile[$i++]));
+        foreach($aTemp as $iVideoSize) {
+            $this->aVideos[] = array(
+                'size' => $iVideoSize,
+                'endpoints' => array(),
+                'requests' => 0
+            );
+        }
 
-            for($j = 0; $j < $aServer['servers']; $j++) {
+        for($z = 0; $z < $this->iEndPoints; $z++) {
+            $aEndPoint = array(
+                'videos' => array(),
+                'latencies' => array(),
+                'servers' => array()
+            );
+
+            list($aEndPoint['latency'], $aEndPoint['servers']) = explode(' ', trim($aFile[$i++]));
+
+            for($j = 0; $j < $aEndPoint['servers']; $j++) {
                 $aTemp = array();
-                list($aTemp['endpoint'], $aTemp['latency']) = explode(' ', trim($aFile[$i++]));
-                $aServer['latencies'][$aTemp['endpoint']] = $aTemp['latency'];
+                list($aTemp['server'], $aTemp['latency']) = explode(' ', trim($aFile[$i++]));
+                $aEndPoint['latencies'][$aTemp['server']] = $aTemp['latency'];
 
-                $this->aEndPoints[$aTemp['endpoint']]['server'][count($this->aServers)] = $aTemp['latency'];
+                $this->aServers[$aTemp['server']]['endpoints'][count($this->aEndPoints)] = $aTemp['latency'];
             }
 
-            $this->aServers[] = $aServer;
+            $this->aEndPoints[] = $aEndPoint;
         }
 
         for($j = 0; $j < $this->iRequestDescriptions; $j++) {
@@ -98,14 +118,100 @@ class Videos {
             $this->aRequests[] = $aTemp;
 
             $this->aEndPoints[$aTemp['endpoint']]['videos'][$aTemp['video']] += $aTemp['requests'];
+
+            $this->aVideos[$aTemp['video']]['endpoints'][$aTemp['endpoint']] = $aTemp['requests'];
+            $this->aVideos[$aTemp['video']]['requests'] += $aTemp['requests'];
         }
+
+        foreach($this->aEndPoints as &$aEndPoint) {
+            asort($aEndPoint['latencies']);
+            arsort($aEndPoint['videos']);
+        }
+
+        foreach($this->aVideos as &$aVideo) {
+            arsort($aVideo['endpoints']);
+        }
+        uasort($this->aVideos, array($this, '_sortVideos'));
+    }
+
+    /**
+     * Internal function to sort the videos based on total requests
+     */
+    protected function _sortVideos($aVideo1, $aVideo2) {
+        if ($aVideo1['requests'] == $aVideo2['requests']) {
+            return 0;
+        }
+
+        return ($aVideo1['requests'] > $aVideo2['requests']) ? -1 : 1;
+    }
+
+    /**
+     * Caches the video
+     */
+    protected function cacheUnrequestedVideo($iVideo) {
+        foreach($this->aServers as $iServer => $aServer) {
+            if($aServer['size'] >= $this->aVideos[$iVideo]['size']) {
+                $this->aServers[$iServer]['videos'][] = $iVideo;
+                $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
+                break;
+            }
+        }
+    }
+
+    /**
+     * Caches the video
+     */
+    protected function cacheVideo($iVideo, $iEndPoint) {
+        foreach($this->aEndPoints[$iEndPoint]['latencies'] as $iServer => $iLatency) {
+            if(in_array($iVideo, $this->aServers[$iServer]['videos'])) {
+                break;
+            }
+
+            //if latency from cache server is greater than latency with datacenter, skip it
+            if($iLatency > $this->aEndPoints[$iEndPoint]['latency']) {
+                continue;
+            }
+
+            if($this->aServers[$iServer]['size'] >= $this->aVideos[$iVideo]['size']) {
+                $this->aServers[$iServer]['videos'][] = $iVideo;
+                $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
+                break;
+            }
+        }
+    }
+
+    /**
+     * Formats the output
+     */
+    protected function getOutput() {
+        $iCount = 0;
+        $aRows = array();
+        foreach($this->aServers as $iServer => $aServer) {
+            if(count($aServer['videos']) > 0) {
+                $iCount++;
+                $aRows[] = $iServer.' '.implode(' ', $aServer['videos']);
+            }
+        }
+
+        return $iCount."\n".implode("\n", $aRows)."\n";
     }
 
     /**
      * Delivers the videos
      */
     public function deliver() {
-        var_dump($this->aRequests);
+        foreach($this->aVideos as $iVideo => $aVideo) {
+            if($aVideo['requests'] > 0) {
+                foreach($aVideo['endpoints'] as $iEndPoint => $iRequests) {
+                    $this->cacheVideo($iVideo, $iEndPoint);
+                }
+            }
+            else {
+                $this->cacheUnrequestedVideo($iVideo);
+            }
+        }
+
+        return $this->getOutput();
     }
 }
 
@@ -113,5 +219,4 @@ $aFiles = array('/me_at_the_zoo.', '/videos_worth_spreading.', '/trending_today.
 foreach($aFiles as $sFile) {
     $oVideos = new Videos(__DIR__.$sFile.'in');
     file_put_contents(__DIR__.$sFile.'out', $oVideos->deliver());
-    break;
 }
