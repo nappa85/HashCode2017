@@ -9,6 +9,10 @@ class Entity {
         $this->iId = $iId;
     }
 
+    public function getId() {
+        return $this->iId;
+    }
+
     public function exclude() {
         $this->bExcluded = true;
     }
@@ -49,11 +53,11 @@ class Entity {
         return true;
     }
 
-    public static function each($aCallback) {
+    public static function each($aCallback, $bCheckExcluded = false) {
         $sClass = get_called_class();
 
         foreach(static::$aCache[$sClass] as &$oEntity) {
-            if($oEntity->excluded()) {
+            if($bCheckExcluded && $oEntity->excluded()) {
                 continue;
             }
 
@@ -100,6 +104,8 @@ class CacheServer extends Entity {
         if($this->aVideoGains[$iVideo] <= 0) {
             unset($this->aVideoGains[$iVideo]);
         }
+
+        $this->sortVideos();
     }
 
     public function getMaxGain() {
@@ -107,6 +113,13 @@ class CacheServer extends Entity {
     }
 
     public function sortVideos() {
+        foreach($this->aVideoGains as $iVideo => $iGain) {
+            $oVideo = Video::get($iVideo);
+            if($oVideo->getSize() > $this->iCapacity) {
+                unset($this->aVideoGains[$iVideo]);
+            }
+        }
+
         arsort($this->aVideoGains);
     }
 
@@ -132,6 +145,10 @@ class CacheServer extends Entity {
             $oEndPoint = EndPoint::get($iEndPoint);
             $oEndPoint->cacheVideo($iVideo, $this->iId);
         }
+    }
+
+    public function getCachesVideos() {
+        return $this->aVideos;
     }
 }
 
@@ -261,6 +278,20 @@ class Videos {
     protected $iCapacity;
 
     /**
+     * Number of used cache servers
+     * @var integer
+     * @protected
+     */
+    protected $iOutputCount = 0;
+
+    /**
+     * List of server usage strings
+     * @var array
+     * @protected
+     */
+    protected $aOutput = array();
+
+    /**
      * Constructor
      * @param   string  file    input file
      */
@@ -291,24 +322,17 @@ class Videos {
         for($j = 0; $j < $this->iRequestDescriptions; $j++) {
             $this->aRequests[] = Request::create($j, explode(' ', trim($aFile[$i++])));
         }
-
-        Entity::sortAll();
     }
 
     /**
      * Formats the output
      */
-    protected function getOutput() {
-        $iCount = 0;
-        $aRows = array();
-        foreach($this->aServers as $iServer => $aServer) {
-            if(count($aServer['videos']) > 0) {
-                $iCount++;
-                $aRows[] = $iServer.' '.implode(' ', $aServer['videos']);
-            }
+    public function getOutput($oCacheServer) {
+        $aVideos = $oCacheServer->getCachesVideos();
+        if(!empty($aVideos)) {
+            $this->iOutputCount++;
+            $this->aOutput[] = $oCacheServer->getId().' '.implode(' ', $aVideos);
         }
-
-        return $iCount."\n".implode("\n", $aRows)."\n";
     }
 
     public function cacheBestVideo($oCacheServer) {
@@ -327,16 +351,18 @@ class Videos {
      */
     public function deliver() {
         while(!CacheServer::allExcluded()) {
-            CacheServer::each(array(&$this, 'cacheBestVideo'));
+            Entity::sortAll();
+            CacheServer::each(array(&$this, 'cacheBestVideo'), true);
         }
 
-        return $this->getOutput();
+        CacheServer::each(array(&$this, 'getOutput'));
+
+        return $this->iOutputCount."\n".implode("\n", $this->aOutput)."\n";;
     }
 }
 
-$aFiles = array('/me_at_the_zoo.'/*, '/videos_worth_spreading.', '/trending_today.', '/kittens.'*/);
+$aFiles = array('/me_at_the_zoo.', '/videos_worth_spreading.', '/trending_today.', '/kittens.');
 foreach($aFiles as $sFile) {
     $oVideos = new Videos(__DIR__.$sFile.'in');
     file_put_contents(__DIR__.$sFile.'out', $oVideos->deliver());
-    break;
 }
