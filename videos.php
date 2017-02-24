@@ -1,5 +1,229 @@
 <?php
 
+class Entity {
+    static protected $aCache = array();
+    protected $iId;
+    protected $bExcluded = false;
+
+    public function __construct($iId) {
+        $this->iId = $iId;
+    }
+
+    public function exclude() {
+        $this->bExcluded = true;
+    }
+
+    public function excluded() {
+        return $this->bExcluded;
+    }
+
+    public static function &create($iId, $aData) {
+        $sClass = get_called_class();
+
+        return static::$aCache[$sClass][$iId] = new $sClass($iId, $aData);
+    }
+
+    public static function &get($iId) {
+        $sClass = get_called_class();
+
+        return static::$aCache[$sClass][$iId];
+    }
+
+    public static function sortAll() {
+        foreach(static::$aCache as $sClass => $aEntities) {
+            if(method_exists($sClass, 'sorter')) {
+                uasort(static::$aCache[$sClass], array($sClass, 'sorter'));
+            }
+        }
+    }
+
+    public static function allExcluded() {
+        $sClass = get_called_class();
+
+        foreach(static::$aCache[$sClass] as &$oEntity) {
+            if(!$oEntity->excluded()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public static function each($aCallback) {
+        $sClass = get_called_class();
+
+        foreach(static::$aCache[$sClass] as &$oEntity) {
+            if($oEntity->excluded()) {
+                continue;
+            }
+
+            call_user_func_array($aCallback, array(&$oEntity));
+        }
+    }
+}
+
+class CacheServer extends Entity {
+    protected $iCapacity;
+    protected $aEndPointLatencies = array();
+    protected $aEndPointDeltas = array();
+    protected $aVideoGains = array();
+    protected $aVideos = array();
+
+    public function __construct($iId, $iCapacity) {
+        parent::__construct($iId);
+        $this->iCapacity = $iCapacity;
+    }
+
+    public static function sorter($oCacheServer1, $oCacheServer2) {
+        $iGain1 = $oCacheServer1->getMaxGain();
+        $iGain2 = $oCacheServer2->getMaxGain();
+
+        if($iGain1 == $iGain2) {
+            return 0;
+        }
+
+        return ($iGain1 > $iGain2) ? -1 : 1;
+    }
+
+    public function linkEndPoint($iEndPoint, $iLatency, $iDelta) {
+        $this->aEndPointLatencies[$iEndPoint] = $iLatency;
+        $this->aEndPointDeltas[$iEndPoint] = $iDelta;
+    }
+
+    public function linkVideoGain($iVideo, $iGain) {
+        $this->aVideoGains[$iVideo] += $iGain;
+    }
+
+    public function unlinkVideoGain($iVideo, $iGain) {
+        $this->aVideoGains[$iVideo] -= $iGain;
+
+        if($this->aVideoGains[$iVideo] <= 0) {
+            unset($this->aVideoGains[$iVideo]);
+        }
+    }
+
+    public function getMaxGain() {
+        return count($this->aVideoGains)?max($this->aVideoGains):0;
+    }
+
+    public function sortVideos() {
+        arsort($this->aVideoGains);
+    }
+
+    public function getBestVideo() {
+        if(count($this->aVideoGains)) {
+            $aVideos = array_keys($this->aVideoGains);
+            return $aVideos[0];
+        }
+
+        return false;
+    }
+
+    public function cacheVideo($iVideo) {
+        $oVideo = Video::get($iVideo);
+        if($oVideo->getSize() > $this->iCapacity) {
+            return;
+        }
+
+        $this->aVideos[] = $iVideo;
+        $this->iCapacity -= $oVideo->getSize();
+
+        foreach($this->aEndPointDeltas as $iEndPoint => $iDelta) {
+            $oEndPoint = EndPoint::get($iEndPoint);
+            $oEndPoint->cacheVideo($iVideo, $this->iId);
+        }
+    }
+}
+
+class Video extends Entity {
+    protected $iId;
+    protected $iSize;
+    protected $iRequests = 0;
+    protected $aRequests = array();
+
+    public function __construct($iId, $iSize) {
+        parent::__construct($iId);
+        $this->iSize = $iSize;
+    }
+
+    public function getSize() {
+        return $this->iSize;
+    }
+
+    public function addRequest($iEndPoint, $iRequests) {
+        $this->iRequests += $iRequests;
+        $this->aRequests[$iEndPoint] += $iRequests;
+    }
+}
+
+class EndPoint extends Entity {
+    protected $iId;
+    protected $iLatency;
+    protected $iCacheServers;
+    protected $aCacheServerLatencies = array();
+    protected $aCacheServerDeltas = array();
+    protected $aRequests = array();
+    protected $aCachedVideos = array();
+
+    public function __construct($iId, $aData) {
+        parent::__construct($iId);
+        $this->iLatency = $aData[0];
+        $this->iCacheServers = $aData[1];
+    }
+
+    public function getCacheServers() {
+        return $this->iCacheServers;
+    }
+
+    public function addCacheServerLatency($aData) {
+        $iDelta = $this->iLatency - $aData[1];
+
+        $this->aCacheServerLatencies[$aData[0]] = $aData[1];
+        $this->aCacheServerDeltas[$aData[0]] = $iDelta;
+
+        $oCacheServer = CacheServer::get($aData[0]);
+        $oCacheServer->linkEndPoint($this->iId, $aData[1], $iDelta);
+    }
+
+    public function addRequest($iVideo, $iRequests) {
+        $this->aRequests[$iVideo] += $iRequests;
+
+        foreach($this->aCacheServerDeltas as $iCacheServer => $iDelta) {
+            $oCacheServer = CacheServer::get($iCacheServer);
+            $oCacheServer->linkVideoGain($iVideo, $iRequests * $iDelta);
+        }
+    }
+
+    public function cacheVideo($iVideo, $iCacheServer) {
+        $this->aCachedVideos[$iVideo] = $iCacheServer;
+
+        foreach($this->aCacheServerDeltas as $iCacheServer => $iDelta) {
+            $oCacheServer = CacheServer::get($iCacheServer);
+            $oCacheServer->unlinkVideoGain($iVideo, $this->aRequests[$iVideo] * $iDelta);
+        }
+    }
+}
+
+class Request extends Entity {
+    protected $iId;
+    protected $iVideo;
+    protected $iEndPoint;
+    protected $iRequests;
+
+    public function __construct($iId, $aData) {
+        parent::__construct($iId);
+        $this->iVideo = $aData[0];
+        $this->iEndPoint = $aData[1];
+        $this->iRequests = $aData[2];
+
+        $oVideo = Video::get($this->iVideo);
+        $oVideo->addRequest($this->iEndPoint, $this->iRequests);
+
+        $oEndPoint = EndPoint::get($this->iEndPoint);
+        $oEndPoint->addRequest($this->iVideo, $this->iRequests);
+    }
+}
+
 class Videos {
     /**
      * Number of Videos
@@ -37,41 +261,6 @@ class Videos {
     protected $iCapacity;
 
     /**
-     * List of Cache servers
-     * @var array
-     * @protected
-     */
-    protected $aServers = array();
-
-    /**
-     * List of Requests
-     * @var array
-     * @protected
-     */
-    protected $aRequests = array();
-
-    /**
-     * Matrix of EndPoints
-     * @var array
-     * @protected
-     */
-    protected $aEndPoints = array();
-
-    /**
-     * Matrix of Videos
-     * @var array
-     * @protected
-     */
-    protected $aVideos = array();
-
-    /**
-     * Array of Gains
-     * @var array
-     * @protected
-     */
-    protected $aGains = array();
-
-    /**
      * Constructor
      * @param   string  file    input file
      */
@@ -83,118 +272,27 @@ class Videos {
         list($this->iVideos, $this->iEndPoints, $this->iRequestDescriptions, $this->iCacheServers, $this->iCapacity) = explode(' ', trim($aFile[$i++]));
 
         for($j = 0; $j < $this->iCacheServers; $j++) {
-            $this->aServers[] = array(
-                'size' => $this->iCapacity,
-                'endpoints' => array(),
-                'videos' => array()
-            );
+            CacheServer::create($j, $this->iCapacity);
         }
 
         $aTemp = explode(' ', trim($aFile[$i++]));
-        foreach($aTemp as $iVideoSize) {
-            $this->aVideos[] = array(
-                'size' => $iVideoSize,
-                'endpoints' => array(),
-                'requests' => 0
-            );
+        foreach($aTemp as $j => $iVideoSize) {
+            Video::create($j, $iVideoSize);
         }
 
         for($z = 0; $z < $this->iEndPoints; $z++) {
-            $aEndPoint = array(
-                'videos' => array(),
-                'latencies' => array(),
-                'servers' => array(),
-                'requests' => array()
-            );
+            $oEndPoint = EndPoint::create($z, explode(' ', trim($aFile[$i++])));
 
-            list($aEndPoint['latency'], $aEndPoint['servers']) = explode(' ', trim($aFile[$i++]));
-
-            for($j = 0; $j < $aEndPoint['servers']; $j++) {
-                $aTemp = array();
-                list($aTemp['server'], $aTemp['latency']) = explode(' ', trim($aFile[$i++]));
-                //store difference between datacenter latency and cache server latency
-                $aEndPoint['latencies'][$aTemp['server']] = $aEndPoint['latency'] - $aTemp['latency'];
-
-                $this->aServers[$aTemp['server']]['endpoints'][count($this->aEndPoints)] = $aTemp['latency'];
+            for($j = 0; $j < $oEndPoint->getCacheServers(); $j++) {
+                $oEndPoint->addCacheServerLatency(explode(' ', trim($aFile[$i++])));
             }
-
-            $this->aEndPoints[] = $aEndPoint;
         }
 
         for($j = 0; $j < $this->iRequestDescriptions; $j++) {
-            $aTemp = array();
-            list($aTemp['video'], $aTemp['endpoint'], $aTemp['requests']) = explode(' ', trim($aFile[$i++]));
-            $this->aRequests[] = $aTemp;
-
-            $this->aEndPoints[$aTemp['endpoint']]['requests'][$aTemp['video']] += $aTemp['requests'];
-
-            $this->aVideos[$aTemp['video']]['endpoints'][$aTemp['endpoint']] = $aTemp['requests'];
-            $this->aVideos[$aTemp['video']]['requests'] += $aTemp['requests'];
-        }
-/*
-        foreach($this->aEndPoints as &$aEndPoint) {
-            arsort($aEndPoint['latencies']);
-            arsort($aEndPoint['videos']);
+            $this->aRequests[] = Request::create($j, explode(' ', trim($aFile[$i++])));
         }
 
-        foreach($this->aVideos as &$aVideo) {
-            arsort($aVideo['endpoints']);
-        }
-        uasort($this->aVideos, array($this, '_sortVideos'));
-*/
-        foreach($this->aEndPoints as $iEndPoint => $aEndPoint) {
-            foreach($aEndPoint['requests'] as $iVideo => $iRequests) {
-                foreach($aEndPoint['latencies'] as $iServer => $iDelta) {
-                    $this->aGains[$iEndPoint.'-'.$iVideo.'-'.$iServer] = $iDelta * $iRequests;
-                }
-            }
-        }
-        arsort($this->aGains);
-    }
-
-    /**
-     * Internal function to sort the videos based on total requests
-     */
-    protected function _sortVideos($aVideo1, $aVideo2) {
-        if ($aVideo1['requests'] == $aVideo2['requests']) {
-            return 0;
-        }
-
-        return ($aVideo1['requests'] > $aVideo2['requests']) ? -1 : 1;
-    }
-
-    /**
-     * Caches the video
-     */
-//     protected function cacheUnrequestedVideo($iVideo) {
-//         foreach($this->aServers as $iServer => $aServer) {
-//             if($aServer['size'] >= $this->aVideos[$iVideo]['size']) {
-//                 $this->aServers[$iServer]['videos'][] = $iVideo;
-//                 $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
-//                 break;
-//             }
-//         }
-//     }
-
-    /**
-     * Caches the video
-     */
-    protected function cacheVideo($iVideo, $iEndPoint, $iServer) {
-        if(in_array($iVideo, $this->aServers[$iServer]['videos'])) {
-            return;
-        }
-
-        if($this->aServers[$iServer]['size'] < $this->aVideos[$iVideo]['size']) {
-            return;
-        }
-
-        $this->aServers[$iServer]['size'] -= $this->aVideos[$iVideo]['size'];
-        $this->aServers[$iServer]['videos'][] = $iVideo;
-
-        //delete unneeded values
-        for($i = 0; $i < $this->iCacheServers; $i++) {
-            unset($this->aGains[$iEndPoint.'-'.$iVideo.'-'.$i]);
-        }
+        Entity::sortAll();
     }
 
     /**
@@ -213,43 +311,32 @@ class Videos {
         return $iCount."\n".implode("\n", $aRows)."\n";
     }
 
+    public function cacheBestVideo($oCacheServer) {
+        $oCacheServer->sortVideos();
+        $iVideo = $oCacheServer->getBestVideo();
+        if($iVideo === false) {
+            $oCacheServer->exclude();
+            return;
+        }
+
+        $oCacheServer->cacheVideo($iVideo);
+    }
+
     /**
      * Delivers the videos
      */
     public function deliver() {
-        $sLastKey = '';
-        while(!empty($this->aGains)) {
-            //check if it has been already parsed
-            $aKeys = array_keys($this->aGains);
-            if($aKeys[0] == $sLastKey) {
-                unset($this->aGains[$aKeys[0]]);
-                $iIndex = 1;
-            }
-            else {
-                $iIndex = 0;
-            }
-
-            $sLastKey = $aKeys[$iIndex];echo "$sLastKey\n";
-            list($iEndPoint, $iVideo, $iServer) = explode('-', $sLastKey);
-
-            $this->cacheVideo($iVideo, $iEndPoint, $iServer);
-
-//             if($aVideo['requests'] > 0) {
-//                 foreach($aVideo['endpoints'] as $iEndPoint => $iRequests) {
-//                     $this->cacheVideo($iVideo, $iEndPoint);
-//                 }
-//             }
-//             else {
-//                 $this->cacheUnrequestedVideo($iVideo);
-//             }
+        while(!CacheServer::allExcluded()) {
+            CacheServer::each(array(&$this, 'cacheBestVideo'));
         }
 
         return $this->getOutput();
     }
 }
 
-$aFiles = array('/me_at_the_zoo.', '/videos_worth_spreading.', '/trending_today.', '/kittens.');
+$aFiles = array('/me_at_the_zoo.'/*, '/videos_worth_spreading.', '/trending_today.', '/kittens.'*/);
 foreach($aFiles as $sFile) {
     $oVideos = new Videos(__DIR__.$sFile.'in');
     file_put_contents(__DIR__.$sFile.'out', $oVideos->deliver());
+    break;
 }
