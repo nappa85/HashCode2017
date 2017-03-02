@@ -53,6 +53,19 @@ class Entity {
         return true;
     }
 
+    public static function first($aCallback, $bCheckExcluded = false) {
+        $sClass = get_called_class();
+
+        foreach(static::$aCache[$sClass] as &$oEntity) {
+            if($bCheckExcluded && $oEntity->excluded()) {
+                continue;
+            }
+
+            call_user_func_array($aCallback, array(&$oEntity));
+            break;
+        }
+    }
+
     public static function each($aCallback, $bCheckExcluded = false) {
         $sClass = get_called_class();
 
@@ -102,10 +115,12 @@ class CacheServer extends Entity {
         $this->aVideoGains[$iVideo] -= $iGain;
 
         if($this->aVideoGains[$iVideo] <= 0) {
+            echo "Video $iVideo deleted from CacheServer {$this->iId}\n";
             unset($this->aVideoGains[$iVideo]);
         }
-
-        $this->sortVideos();
+        else {
+            echo "Video $iVideo uncached from CacheServer {$this->iId}\n";
+        }
     }
 
     public function getMaxGain() {
@@ -116,11 +131,17 @@ class CacheServer extends Entity {
         foreach($this->aVideoGains as $iVideo => $iGain) {
             $oVideo = Video::get($iVideo);
             if($oVideo->getSize() > $this->iCapacity) {
+                echo "Video $iVideo excluded for CacheServer {$this->iId}\n";
                 unset($this->aVideoGains[$iVideo]);
             }
         }
 
-        arsort($this->aVideoGains);
+        if(empty($this->aVideoGains)) {
+            $this->exclude();
+        }
+        else {
+            arsort($this->aVideoGains);
+        }
     }
 
     public function getBestVideo() {
@@ -135,11 +156,13 @@ class CacheServer extends Entity {
     public function cacheVideo($iVideo) {
         $oVideo = Video::get($iVideo);
         if($oVideo->getSize() > $this->iCapacity) {
-            return;
+            echo "Video $iVideo out of size for CacheServer {$this->iId}\n";
+            return false;
         }
 
         $this->aVideos[] = $iVideo;
         $this->iCapacity -= $oVideo->getSize();
+        echo "Video $iVideo stored on CacheServer {$this->iId}\n";
 
         foreach($this->aEndPointDeltas as $iEndPoint => $iDelta) {
             $oEndPoint = EndPoint::get($iEndPoint);
@@ -147,7 +170,7 @@ class CacheServer extends Entity {
         }
     }
 
-    public function getCachesVideos() {
+    public function getCachedVideos() {
         return $this->aVideos;
     }
 }
@@ -213,6 +236,7 @@ class EndPoint extends Entity {
 
     public function cacheVideo($iVideo, $iCacheServer) {
         $this->aCachedVideos[$iVideo] = $iCacheServer;
+        echo "EndPoint {$this->iId} server for Video $iVideo\n";
 
         foreach($this->aCacheServerDeltas as $iCacheServer => $iDelta) {
             $oCacheServer = CacheServer::get($iCacheServer);
@@ -278,13 +302,6 @@ class Videos {
     protected $iCapacity;
 
     /**
-     * Number of used cache servers
-     * @var integer
-     * @protected
-     */
-    protected $iOutputCount = 0;
-
-    /**
      * List of server usage strings
      * @var array
      * @protected
@@ -328,10 +345,9 @@ class Videos {
      * Formats the output
      */
     public function getOutput($oCacheServer) {
-        $aVideos = $oCacheServer->getCachesVideos();
+        $aVideos = $oCacheServer->getCachedVideos();
         if(!empty($aVideos)) {
-            $this->iOutputCount++;
-            $this->aOutput[] = $oCacheServer->getId().' '.implode(' ', $aVideos);
+            $this->aOutput[$oCacheServer->getId()] = $oCacheServer->getId().' '.implode(' ', $aVideos);
         }
     }
 
@@ -352,17 +368,19 @@ class Videos {
     public function deliver() {
         while(!CacheServer::allExcluded()) {
             Entity::sortAll();
-            CacheServer::each(array(&$this, 'cacheBestVideo'), true);
+            CacheServer::first(array(&$this, 'cacheBestVideo'), true);
         }
 
         CacheServer::each(array(&$this, 'getOutput'));
 
-        return $this->iOutputCount."\n".implode("\n", $this->aOutput)."\n";;
+        ksort($this->aOutput);
+        return count($this->aOutput)."\n".implode("\n", $this->aOutput)."\n";;
     }
 }
 
 $aFiles = array('/me_at_the_zoo.', '/videos_worth_spreading.', '/trending_today.', '/kittens.');
 foreach($aFiles as $sFile) {
+    echo "$sFile\n";
     $oVideos = new Videos(__DIR__.$sFile.'in');
     file_put_contents(__DIR__.$sFile.'out', $oVideos->deliver());
 }
